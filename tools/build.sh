@@ -57,6 +57,7 @@ go install "golang.org/x/mobile/cmd/gobind@$MOBILE_VERSION"
 gomobile init
 (
   cd "$BINDMOD"
+  go get "golang.org/x/mobile@$MOBILE_VERSION"
   gomobile bind -target=android/arm64 -androidapi 24 -javapkg com.x.tunnel     -o "$BINDMOD/tunnel-bindings.aar" ./tunnel
 )
 unzip -p "$BINDMOD/tunnel-bindings.aar" classes.jar > "$BINDMOD/tunnel-bindings.jar"
