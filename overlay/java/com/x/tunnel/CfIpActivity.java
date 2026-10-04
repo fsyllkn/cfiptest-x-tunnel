@@ -12,6 +12,7 @@ import android.text.InputType;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -19,6 +20,7 @@ import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -28,6 +30,8 @@ import org.json.JSONObject;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -43,6 +47,7 @@ public class CfIpActivity extends Activity {
     private static final String K_BW = "Bandwidth";
     private static final String K_MAX = "MaxResults";
     private static final String K_HISTORY = "ScanHistoryV1";
+    private static final String K_TARGET_PROFILE = "TargetProfileId";
 
     private Preferences prefs;
     private SharedPreferences cfPrefs;
@@ -60,6 +65,7 @@ public class CfIpActivity extends Activity {
     private Button clearHistory;
     private TextView profile;
     private TextView currentIp;
+    private Spinner targetProfile;
     private TextView progress;
     private LinearLayout results;
 
@@ -67,6 +73,7 @@ public class CfIpActivity extends Activity {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final AtomicBoolean busy = new AtomicBoolean(false);
     private final List<Row> rows = new ArrayList<>();
+    private final List<String> targetProfileIds = new ArrayList<>();
 
     private static final class Row {
         String ip;
@@ -82,6 +89,7 @@ public class CfIpActivity extends Activity {
         setTitle("CF 优选 IP");
         setContentView(buildUi());
         restoreSettings();
+        refreshProfileSelector();
         refreshHeader();
         renderHistory();
     }
@@ -89,7 +97,10 @@ public class CfIpActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         prefs = new Preferences(this);
-        if (profile != null) refreshHeader();
+        if (profile != null) {
+            refreshProfileSelector();
+            refreshHeader();
+        }
     }
 
     @Override protected void onDestroy() {
@@ -118,6 +129,15 @@ public class CfIpActivity extends Activity {
         LinearLayout.LayoutParams profileLp = full();
         profileLp.topMargin = dp(12);
         root.addView(profile, profileLp);
+
+        TextView targetLabel = bold("应用目标节点");
+        LinearLayout.LayoutParams targetLabelLp = full();
+        targetLabelLp.topMargin = dp(8);
+        root.addView(targetLabel, targetLabelLp);
+
+        targetProfile = new Spinner(this);
+        root.addView(targetProfile, full());
+
         currentIp = new TextView(this);
         currentIp.setAlpha(0.75f);
         root.addView(currentIp, full());
@@ -187,13 +207,21 @@ public class CfIpActivity extends Activity {
         results.setOrientation(LinearLayout.VERTICAL);
         root.addView(results, full());
 
-        apply = new Button(this); apply.setText("应用到当前节点");
+        apply = new Button(this); apply.setText("应用到所选节点");
         root.addView(apply, full());
 
         scan.setOnClickListener(x -> { if (busy.get()) cancel(); else prepareScan(); });
         selectQualified.setOnClickListener(x -> {
-            for (Row row : rows) row.box.setChecked(row.qualified);
+            int selectedCount = 0;
+            for (Row row : rows) {
+                boolean choose = row.qualified;
+                row.box.setChecked(choose);
+                if (choose) selectedCount++;
+            }
             updateControls();
+            progress.setText(selectedCount > 0
+                    ? "已选择 " + selectedCount + " 个达标 IP"
+                    : "当前记录中没有达到目标带宽的 IP");
         });
         clearSelection.setOnClickListener(x -> {
             for (Row row : rows) row.box.setChecked(false);
@@ -221,10 +249,69 @@ public class CfIpActivity extends Activity {
         maxResults.setText(Integer.toString(cfPrefs.getInt(K_MAX, 6)));
     }
 
+    private void refreshProfileSelector() {
+        if (targetProfile == null) return;
+
+        String currentId = prefs.getCurrentProfileId();
+        String remembered = cfPrefs.getString(K_TARGET_PROFILE, currentId);
+
+        List<String> ids = new ArrayList<>(prefs.getProfileIds());
+        Collections.sort(ids, new Comparator<String>() {
+            @Override public int compare(String a, String b) {
+                if (a.equals(currentId) && !b.equals(currentId)) return -1;
+                if (!a.equals(currentId) && b.equals(currentId)) return 1;
+                return prefs.getProfileName(a).compareToIgnoreCase(prefs.getProfileName(b));
+            }
+        });
+
+        targetProfileIds.clear();
+        targetProfileIds.addAll(ids);
+
+        List<String> labels = new ArrayList<>();
+        int selected = 0;
+        for (int i = 0; i < targetProfileIds.size(); i++) {
+            String id = targetProfileIds.get(i);
+            String label = prefs.getProfileName(id);
+            if (id.equals(currentId)) label += "（当前）";
+            labels.add(label);
+            if (id.equals(remembered)) selected = i;
+        }
+
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(
+                this, android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        targetProfile.setAdapter(adapter);
+        if (!labels.isEmpty()) targetProfile.setSelection(selected, false);
+
+        targetProfile.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                if (position >= 0 && position < targetProfileIds.size()) {
+                    cfPrefs.edit().putString(K_TARGET_PROFILE, targetProfileIds.get(position)).apply();
+                    refreshHeader();
+                }
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
+    }
+
+    private String getTargetProfileId() {
+        if (targetProfileIds.isEmpty()) return prefs.getCurrentProfileId();
+        int pos = targetProfile == null ? -1 : targetProfile.getSelectedItemPosition();
+        if (pos < 0 || pos >= targetProfileIds.size()) {
+            String remembered = cfPrefs.getString(K_TARGET_PROFILE, prefs.getCurrentProfileId());
+            if (targetProfileIds.contains(remembered)) return remembered;
+            return prefs.getCurrentProfileId();
+        }
+        return targetProfileIds.get(pos);
+    }
+
     private void refreshHeader() {
-        profile.setText("当前节点：" + prefs.getProfileName(prefs.getCurrentProfileId()));
-        String ip = prefs.getPrefIp();
-        currentIp.setText("当前优选 IP：" + ((ip == null || ip.trim().isEmpty()) ? "未设置" : ip));
+        String currentId = prefs.getCurrentProfileId();
+        profile.setText("当前 X-Tunnel 节点：" + prefs.getProfileName(currentId));
+
+        String targetId = getTargetProfileId();
+        String ip = prefs.getPrefIpForProfile(targetId);
+        currentIp.setText("目标节点优选 IP：" + ((ip == null || ip.trim().isEmpty()) ? "未设置" : ip));
     }
 
     private void prepareScan() {
@@ -389,11 +476,16 @@ public class CfIpActivity extends Activity {
                 if (c == null) continue;
                 String ip = c.optString("ip", "").trim();
                 if (ip.isEmpty()) continue;
-                boolean qualified = c.optBoolean("qualified", false);
+                int targetMbps = Math.max(1, batch.optInt("bandwidth", 1));
+                int realMbps = c.optInt("realBandwidth", 0);
+                int maxSpeedKB = c.optInt("maxSpeed", 0);
+                boolean qualified = c.optBoolean("qualified", false)
+                        || realMbps >= targetMbps
+                        || maxSpeedKB >= targetMbps * 128;
                 CheckBox box = new CheckBox(this);
                 box.setText(ip + "\n"
-                        + c.optInt("realBandwidth", 0) + " Mbps  |  "
-                        + c.optInt("maxSpeed", 0) + " kB/s  |  "
+                        + realMbps + " Mbps  |  "
+                        + maxSpeedKB + " kB/s  |  "
                         + c.optInt("latencyMs", 0) + " ms  |  "
                         + c.optString("dataCenter", "-") + "  |  "
                         + (qualified ? "达标" : "未达目标"));
@@ -432,16 +524,20 @@ public class CfIpActivity extends Activity {
             return;
         }
         String value = TextUtils.join(",", selected);
-        prefs.setPrefIp(value);
+        String targetId = getTargetProfileId();
+        String targetName = prefs.getProfileName(targetId);
+        prefs.setPrefIpForProfile(targetId, value);
         prefs.setEnable(false);
         refreshHeader();
-        progress.setText("已写入：" + value + "\n测速记录已保留；VPN 未启动。");
-        Toast.makeText(this, "已应用到当前节点；VPN 保持停止", Toast.LENGTH_LONG).show();
+        progress.setText("已写入节点「" + targetName + "」：" + value
+                + "\n测速记录已保留；VPN 未启动。");
+        Toast.makeText(this, "已应用到「" + targetName + "」；VPN 保持停止", Toast.LENGTH_LONG).show();
     }
 
     private void setBusyUi(boolean state) {
         v4.setEnabled(!state); v6.setEnabled(!state); tls.setEnabled(!state);
         bandwidth.setEnabled(!state); maxResults.setEnabled(!state);
+        if (targetProfile != null) targetProfile.setEnabled(!state);
         for (Row row : rows) row.box.setEnabled(!state);
         updateControls();
     }
