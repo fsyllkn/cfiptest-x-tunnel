@@ -75,6 +75,38 @@ replace_once(
 ''',
 )
 
+replace_once(
+    prefs,
+    '''        public String getPrefIp() { return prefs.getString(getKey(PREF_IP), ""); }
+
+        public void setPrefIp(String ip) {
+                SharedPreferences.Editor editor = prefs.edit();
+                editor.putString(getKey(PREF_IP), ip);
+                editor.commit();
+        }
+''',
+    '''        public String getPrefIp() { return prefs.getString(getKey(PREF_IP), ""); }
+
+        public String getPrefIpForProfile(String profileId) {
+                if (profileId == null || profileId.isEmpty()) return "";
+                return prefs.getString(PREF_IP + "_" + profileId, "");
+        }
+
+        public void setPrefIpForProfile(String profileId, String ip) {
+                if (profileId == null || profileId.isEmpty()) return;
+                SharedPreferences.Editor editor = prefs.edit();
+                editor.putString(PREF_IP + "_" + profileId, ip);
+                editor.commit();
+        }
+
+        public void setPrefIp(String ip) {
+                SharedPreferences.Editor editor = prefs.edit();
+                editor.putString(getKey(PREF_IP), ip);
+                editor.commit();
+        }
+''',
+)
+
 main = app / 'java/com/x/tunnel/MainActivity.java'
 replace_once(
     main,
