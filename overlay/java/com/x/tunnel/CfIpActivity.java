@@ -160,7 +160,7 @@ public class CfIpActivity extends Activity {
         LinearLayout left = new LinearLayout(this); left.setOrientation(LinearLayout.VERTICAL);
         LinearLayout right = new LinearLayout(this); right.setOrientation(LinearLayout.VERTICAL);
         left.addView(bold("目标带宽 Mbps"), full());
-        right.addView(bold("候选数量 1-10"), full());
+        right.addView(bold("达标 IP 数量 1-10"), full());
         bandwidth = numberInput();
         maxResults = numberInput();
         left.addView(bandwidth, full()); right.addView(maxResults, full());
