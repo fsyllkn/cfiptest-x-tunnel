@@ -1,0 +1,45 @@
+name: Build APK-base X-Tunnel + CFIP
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.0'
+          cache: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android SDK + NDK
+        shell: bash
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" 'platforms;android-35' 'build-tools;35.0.0' 'ndk;26.1.10909125'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> "$GITHUB_ENV"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build reconstructed APK
+        run: bash tools/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-tunnel-apkbase-cfip-arm64
+          path: |
+            x-tunnel-apkbase-cfip-arm64-debug.apk
+            x-tunnel-apkbase-cfip-arm64-debug.apk.sha256
+          if-no-files-found: error
