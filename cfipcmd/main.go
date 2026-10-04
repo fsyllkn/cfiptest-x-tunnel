@@ -40,18 +40,15 @@ func main() {
 			case result := <-done:
 				p := cfip.GetProgress()
 				if p != "" && p != last {
-					fmt.Printf("PROGRESS	%s
-", sanitizeLine(p))
+					fmt.Printf("PROGRESS\t%s\n", sanitizeLine(p))
 				}
-				fmt.Printf("RESULT	%s
-", result)
+				fmt.Printf("RESULT\t%s\n", result)
 				return
 			case <-ticker.C:
 				p := cfip.GetProgress()
 				if p != "" && p != last {
 					last = p
-					fmt.Printf("PROGRESS	%s
-", sanitizeLine(p))
+					fmt.Printf("PROGRESS\t%s\n", sanitizeLine(p))
 				}
 			}
 		}
@@ -62,8 +59,7 @@ func main() {
 		_ = fs.Parse(os.Args[2:])
 		cfip.SetCacheDir(strings.TrimSpace(*cacheDir))
 		cfip.UpdateData()
-		fmt.Printf("RESULT	{"ok":true,"message":%q}
-", cfip.GetProgress())
+		fmt.Printf("RESULT\t{\"ok\":true,\"message\":%q}\n", cfip.GetProgress())
 
 	case "clear":
 		fs := flag.NewFlagSet("clear", flag.ExitOnError)
@@ -71,8 +67,7 @@ func main() {
 		_ = fs.Parse(os.Args[2:])
 		cfip.SetCacheDir(strings.TrimSpace(*cacheDir))
 		cfip.ClearCache()
-		fmt.Printf("RESULT	{"ok":true,"message":%q}
-", cfip.GetProgress())
+		fmt.Printf("RESULT\t{\"ok\":true,\"message\":%q}\n", cfip.GetProgress())
 
 	default:
 		fmt.Fprintln(os.Stderr, "unknown command:", os.Args[1])
@@ -81,8 +76,7 @@ func main() {
 }
 
 func sanitizeLine(s string) string {
-	s = strings.ReplaceAll(s, "", " ")
-	s = strings.ReplaceAll(s, "
-", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
 	return strings.TrimSpace(s)
 }
