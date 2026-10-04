@@ -38,12 +38,53 @@ type CandidateListResult struct {
 }
 
 var (
-	dataDir    string
-	progress   string
-	progressMu sync.Mutex
-	rng        = rand.New(rand.NewSource(time.Now().UnixNano()))
-	rngMu      sync.Mutex
+	dataDir      string
+	progress     string
+	progressMu   sync.Mutex
+	rng          = rand.New(rand.NewSource(time.Now().UnixNano()))
+	rngMu        sync.Mutex
+	cancelCtx    context.Context
+	cancelCancel context.CancelFunc
+	cancelMu     sync.Mutex
 )
+
+func scanCtx() context.Context {
+	cancelMu.Lock()
+	defer cancelMu.Unlock()
+	if cancelCtx != nil {
+		return cancelCtx
+	}
+	return context.Background()
+}
+
+func resetCancel() {
+	cancelMu.Lock()
+	defer cancelMu.Unlock()
+	cancelCtx, cancelCancel = context.WithCancel(context.Background())
+}
+
+func isCancelled() bool {
+	cancelMu.Lock()
+	defer cancelMu.Unlock()
+	if cancelCtx == nil {
+		return false
+	}
+	select {
+	case <-cancelCtx.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+func CancelScan() {
+	cancelMu.Lock()
+	if cancelCancel != nil {
+		cancelCancel()
+	}
+	cancelMu.Unlock()
+	setProgress("用户已取消扫描")
+}
 
 func SetCacheDir(dir string) { dataDir = dir }
 func GetProgress() string {
@@ -71,7 +112,8 @@ func ClearCache() {
 
 func UpdateData() {
 	ClearCache()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	resetCancel()
+	ctx, cancel := context.WithTimeout(scanCtx(), 20*time.Second)
 	defer cancel()
 	if err := ensureData(ctx); err != nil {
 		setProgress("数据更新失败: " + err.Error())
@@ -174,50 +216,126 @@ func sampleSubnets(in []string, n int) []string {
 
 func testRTT(ctx context.Context, ip string, tlsOn bool) int {
 	port := "80"
-	if tlsOn { port = "443" }
-	total := 0
-	for i:=0; i<3; i++ {
+	if tlsOn {
+		port = "443"
+	}
+
+	var totalMs int
+	for i := 0; i < 3; i++ {
+		if isCancelled() {
+			return 0
+		}
+
 		start := time.Now()
-		d := net.Dialer{Timeout: 1200*time.Millisecond}
+		d := net.Dialer{Timeout: 1 * time.Second}
 		conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(ip, port))
-		if err != nil { return 0 }
-		rwc := net.Conn(conn)
+		if err != nil {
+			return 0
+		}
+		tcpDuration := time.Since(start)
+
+		_ = conn.SetDeadline(start.Add(1 * time.Second))
+		var rwc net.Conn = conn
 		if tlsOn {
-			tc := tls.Client(conn, &tls.Config{ServerName:"cloudflare.com", InsecureSkipVerify:true})
-			if err := tc.HandshakeContext(ctx); err != nil { conn.Close(); return 0 }
+			tc := tls.Client(conn, &tls.Config{ServerName: "cloudflare.com", InsecureSkipVerify: true})
+			if err := tc.HandshakeContext(ctx); err != nil {
+				conn.Close()
+				return 0
+			}
 			rwc = tc
 		}
-		_ = rwc.SetDeadline(time.Now().Add(1500*time.Millisecond))
-		_, err = io.WriteString(rwc, "HEAD / HTTP/1.1\r\nHost: cloudflare.com\r\nConnection: close\r\n\r\n")
-		if err != nil { rwc.Close(); return 0 }
+
+		_, err = io.WriteString(rwc, "GET / HTTP/1.1\r\nHost: cloudflare.com\r\nUser-Agent: Mozilla/5.0\r\nConnection: close\r\n\r\n")
+		if err != nil {
+			rwc.Close()
+			return 0
+		}
+
 		resp, err := http.ReadResponse(bufio.NewReader(rwc), nil)
 		rwc.Close()
-		if err != nil || resp.Header.Get("CF-RAY") == "" { return 0 }
-		if resp.Body != nil { resp.Body.Close() }
-		total += int(time.Since(start).Milliseconds())
+		if err != nil {
+			return 0
+		}
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
+		if resp.Header.Get("CF-RAY") == "" {
+			return 0
+		}
+		totalMs += int(tcpDuration.Milliseconds())
 	}
-	return total/3
+	return totalMs / 3
 }
 
 func rttCandidates(ctx context.Context, ips []string, tlsOn bool) []CandidateResult {
-	type item struct{ ip string; ms int }
-	ch := make(chan item, len(ips))
-	sem := make(chan struct{}, 50)
+	if len(ips) == 0 {
+		return nil
+	}
+
+	type item struct {
+		ip string
+		ms int
+	}
+	resultChan := make(chan item, len(ips))
+	thread := make(chan struct{}, 50)
 	var wg sync.WaitGroup
+	var count int
+	var countMu sync.Mutex
+	total := len(ips)
+
 	for _, ip := range ips {
-		if ip == "" { continue }
+		if isCancelled() {
+			break
+		}
+		if ip == "" {
+			continue
+		}
 		wg.Add(1)
-		go func(ip string){
-			defer wg.Done()
-			sem <- struct{}{}; defer func(){<-sem}()
-			if ms := testRTT(ctx, ip, tlsOn); ms > 0 { ch <- item{ip,ms} }
+		thread <- struct{}{}
+		go func(ip string) {
+			defer func() {
+				<-thread
+				wg.Done()
+				countMu.Lock()
+				count++
+				current := count
+				countMu.Unlock()
+				if current%10 == 0 || current == total {
+					setProgress(fmt.Sprintf("RTT 测试进度: %d/%d", current, total))
+				}
+			}()
+
+			if isCancelled() {
+				return
+			}
+			if ms := testRTT(ctx, ip, tlsOn); ms > 0 {
+				resultChan <- item{ip: ip, ms: ms}
+			}
 		}(ip)
 	}
-	go func(){ wg.Wait(); close(ch) }()
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
 	var out []CandidateResult
-	for x := range ch { out = append(out, CandidateResult{IP:x.ip, LatencyMs:x.ms}) }
-	sort.Slice(out, func(i,j int) bool { return out[i].LatencyMs < out[j].LatencyMs })
-	if len(out)>10 { out=out[:10] }
+	for x := range resultChan {
+		out = append(out, CandidateResult{IP: x.ip, LatencyMs: x.ms})
+	}
+	if isCancelled() {
+		return nil
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].LatencyMs < out[j].LatencyMs
+	})
+	if len(out) > 10 {
+		setProgress(fmt.Sprintf("RTT 测试完成，%d/%d 个 IP 有效，保留延迟最低的 10 个", len(out), total))
+		out = out[:10]
+	} else {
+		setProgress(fmt.Sprintf("RTT 测试完成，%d/%d 个 IP 有效", len(out), total))
+	}
 	return out
 }
 
@@ -232,162 +350,295 @@ func speedTarget() (string,string,error) {
 	return parts[0], parts[1], nil
 }
 
-func speedTest(ctx context.Context, ip string, tlsOn bool) (int,string) {
-	host, fileName, err := speedTarget()
-	if err != nil { return 0,"" }
-	port := "80"; scheme := "http"
-	if tlsOn { port="443"; scheme="https" }
-	tr := &http.Transport{
-		DialContext: func(c context.Context, network, addr string)(net.Conn,error){
-			return (&net.Dialer{Timeout:3*time.Second}).DialContext(c,"tcp",net.JoinHostPort(ip,port))
-		},
-		TLSClientConfig: &tls.Config{ServerName:host},
+type speedTestResult struct {
+	VerifiedSpeed int
+	PeakSpeed     int
+	DataCenter    string
+	Qualified     bool
+}
+
+func averageSpeed(values []int) int {
+	if len(values) == 0 {
+		return 0
 	}
-	client := &http.Client{Transport:tr, Timeout:6*time.Second}
-	req, _ := http.NewRequestWithContext(ctx,http.MethodGet,scheme+"://"+host+"/"+fileName,nil)
+	total := 0
+	for _, v := range values {
+		total += v
+	}
+	return total / len(values)
+}
+
+// speedTest keeps the original one-connection download test, but adds:
+// - 5 second quick rejection for clearly slow IPs
+// - 15 second sustained verification for promising IPs
+func speedTest(ctx context.Context, ip string, tlsOn bool, targetKB int) speedTestResult {
+	host, fileName, err := speedTarget()
+	if err != nil {
+		return speedTestResult{}
+	}
+
+	port := "80"
+	scheme := "http"
+	if tlsOn {
+		port = "443"
+		scheme = "https"
+	}
+
+	tr := &http.Transport{
+		DialContext: func(c context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(c, "tcp", net.JoinHostPort(ip, port))
+		},
+		TLSClientConfig: &tls.Config{ServerName: host},
+	}
+	client := &http.Client{Transport: tr, Timeout: 22 * time.Second}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, scheme+"://"+host+"/"+fileName, nil)
 	resp, err := client.Do(req)
-	if err != nil { return 0,"" }
+	if err != nil {
+		return speedTestResult{}
+	}
 	defer resp.Body.Close()
+
 	dc := ""
 	if ray := resp.Header.Get("CF-RAY"); ray != "" {
-		p := strings.Split(ray,"-")
-		if len(p)>1 { dc = p[len(p)-1] }
+		parts := strings.Split(ray, "-")
+		if len(parts) > 1 {
+			dc = strings.TrimSpace(parts[len(parts)-1])
+		}
 	}
-	buf := make([]byte,32<<10)
-	start := time.Now()
-	var bytes int64
-	for time.Since(start)<4*time.Second {
-		n, er := resp.Body.Read(buf)
-		bytes += int64(n)
-		if er != nil { break }
+
+	buf := make([]byte, 32<<10)
+	testStart := time.Now()
+	windowStart := testStart
+	var windowBytes int64
+	var windows []int
+	peakSpeed := 0
+	quickChecked := false
+	reached15s := false
+
+	for {
+		if isCancelled() {
+			return speedTestResult{}
+		}
+
+		n, readErr := resp.Body.Read(buf)
+		windowBytes += int64(n)
+		now := time.Now()
+		windowElapsed := now.Sub(windowStart).Seconds()
+
+		if windowElapsed >= 1.0 {
+			speedKB := int(float64(windowBytes) / 1024 / windowElapsed)
+			windows = append(windows, speedKB)
+			if speedKB > peakSpeed {
+				peakSpeed = speedKB
+			}
+			windowBytes = 0
+			windowStart = now
+
+			elapsed := now.Sub(testStart)
+			setProgress(fmt.Sprintf("%s 稳定测速 %ds/15s: %d kB/s", ip, int(elapsed.Seconds()), speedKB))
+
+			if !quickChecked && elapsed >= 5*time.Second {
+				quickChecked = true
+				quickWindows := windows
+				if len(quickWindows) > 2 {
+					quickWindows = quickWindows[2:]
+				}
+				quickAvg := averageSpeed(quickWindows)
+				if quickAvg < targetKB*3/4 && peakSpeed < targetKB {
+					setProgress(fmt.Sprintf("%s 5 秒初筛未达标（均速 %d kB/s，峰值 %d kB/s），快速跳过", ip, quickAvg, peakSpeed))
+					return speedTestResult{VerifiedSpeed: quickAvg, PeakSpeed: peakSpeed, DataCenter: dc}
+				}
+			}
+
+			if elapsed >= 15*time.Second {
+				reached15s = true
+				break
+			}
+		}
+
+		if readErr != nil {
+			break
+		}
 	}
-	elapsed := time.Since(start).Seconds()
-	if elapsed <= 0 { return 0,dc }
-	return int(float64(bytes)/1024.0/elapsed),dc
+
+	if len(windows) == 0 {
+		return speedTestResult{DataCenter: dc}
+	}
+
+	stableWindows := windows
+	if len(stableWindows) > 2 {
+		stableWindows = stableWindows[2:]
+	}
+	stableAvg := averageSpeed(stableWindows)
+
+	nearTarget := 0
+	atTarget := 0
+	for _, v := range stableWindows {
+		if v >= targetKB*4/5 {
+			nearTarget++
+		}
+		if v >= targetKB {
+			atTarget++
+		}
+	}
+
+	qualified := reached15s &&
+		stableAvg >= targetKB &&
+		len(stableWindows) > 0 &&
+		nearTarget*10 >= len(stableWindows)*7 &&
+		atTarget >= 3
+
+	return speedTestResult{
+		VerifiedSpeed: stableAvg,
+		PeakSpeed:     peakSpeed,
+		DataCenter:    dc,
+		Qualified:     qualified,
+	}
 }
 
 func GetIPCandidates(v4 bool, useTLS bool, bandwidth int, maxResults int) string {
-	if bandwidth <= 0 { bandwidth=1 }
-	if maxResults < 1 { maxResults=6 }
-	if maxResults > 10 { maxResults=10 }
+	setProgress("正在初始化...")
+	resetCancel()
+
+	if bandwidth <= 0 {
+		bandwidth = 1
+	}
+	if maxResults < 1 {
+		maxResults = 1
+	}
+	if maxResults > 10 {
+		maxResults = 10
+	}
 
 	start := time.Now()
-	ctx := context.Background()
-	result := CandidateListResult{Bandwidth:bandwidth}
+	ctx := scanCtx()
+	result := CandidateListResult{Bandwidth: bandwidth}
 
 	if err := ensureData(ctx); err != nil {
 		result.Error = err.Error()
-		b,_:=json.Marshal(result)
+		b, _ := json.Marshal(result)
 		return string(b)
 	}
 
 	file := "ips-v4.txt"
-	if !v4 { file="ips-v6.txt" }
+	if !v4 {
+		file = "ips-v6.txt"
+	}
 	subnets, err := readLines(file)
 	if err != nil {
-		result.Error=err.Error()
-		b,_:=json.Marshal(result)
+		result.Error = err.Error()
+		b, _ := json.Marshal(result)
 		return string(b)
 	}
 	if len(subnets) == 0 {
-		result.Error="IP 列表为空"
-		b,_:=json.Marshal(result)
+		result.Error = "IP 列表为空"
+		b, _ := json.Marshal(result)
 		return string(b)
 	}
 
-	// Keep the original CFIP test semantics:
-	// the requested count means "qualified IP count", not "candidate count".
-	// Non-qualified IPs never enter the final result and never consume quota.
-	seen := map[string]bool{}
+	sampleSize := 100
+	if len(subnets) < sampleSize {
+		sampleSize = len(subnets)
+	}
 	targetKB := bandwidth * 128
-	round := 0
+	qualifiedSeen := make(map[string]bool)
 
 	for len(result.Candidates) < maxResults {
-		round++
-		setProgress(fmt.Sprintf(
-			"第 %d 轮：已找到 %d/%d 个达标 IP，开始 RTT 测试...",
-			round, len(result.Candidates), maxResults))
+		if isCancelled() {
+			result.Cancelled = true
+			result.Error = "扫描已取消"
+			break
+		}
 
-		var ips []string
-		for _, s := range sampleSubnets(subnets, 100) {
-			if ip := randomFromCIDR(s); ip != "" && !seen[ip] {
-				seen[ip] = true
-				ips = append(ips, ip)
+		var cands []CandidateResult
+		for {
+			if isCancelled() {
+				result.Cancelled = true
+				result.Error = "扫描已取消"
+				break
 			}
-		}
 
-		// Extremely unlikely for normal CF CIDR lists, but do not spin on an
-		// empty generated batch. Clear the random-IP de-duplication set and
-		// start a fresh sampling cycle.
-		if len(ips) == 0 {
-			seen = map[string]bool{}
-			continue
-		}
+			sampled := sampleSubnets(subnets, sampleSize)
+			var ips []string
+			for _, subnet := range sampled {
+				if ip := randomFromCIDR(subnet); ip != "" {
+					ips = append(ips, ip)
+				}
+			}
 
-		cands := rttCandidates(ctx, ips, useTLS)
-		if len(cands) == 0 {
-			setProgress(fmt.Sprintf(
-				"第 %d 轮没有可用 RTT IP，继续下一轮（已达标 %d/%d）",
-				round, len(result.Candidates), maxResults))
-			continue
+			setProgress(fmt.Sprintf("已生成 %d 个测试 IP，开始 RTT 测试（已达标 %d/%d）...", len(ips), len(result.Candidates), maxResults))
+			cands = rttCandidates(ctx, ips, useTLS)
+			if isCancelled() {
+				result.Cancelled = true
+				result.Error = "扫描已取消"
+				break
+			}
+			if len(cands) > 0 {
+				break
+			}
+			setProgress("当前所有 IP 都存在 RTT 丢包，继续新的 RTT 测试...")
+		}
+		if result.Cancelled {
+			break
 		}
 
 		for i := range cands {
-			setProgress(fmt.Sprintf(
-				"测速 %s (%dms)，已达标 %d/%d",
-				cands[i].IP, cands[i].LatencyMs,
-				len(result.Candidates), maxResults))
-
-			kb, dc := speedTest(ctx, cands[i].IP, useTLS)
-			if kb <= 0 {
+			if isCancelled() {
+				result.Cancelled = true
+				result.Error = "扫描已取消"
+				break
+			}
+			if qualifiedSeen[cands[i].IP] {
 				continue
 			}
 
-			// Same threshold semantics as the original test APK:
-			// bandwidth Mbps -> target kB/s, only accept maxSpeed >= target.
-			if kb < targetKB {
-				setProgress(fmt.Sprintf(
-					"%s 峰值 %d kB/s，未达到 %d Mbps，继续测试...",
-					cands[i].IP, kb, bandwidth))
+			setProgress(fmt.Sprintf("正在测速 %s (RTT %dms，已达标 %d/%d)", cands[i].IP, cands[i].LatencyMs, len(result.Candidates), maxResults))
+			sr := speedTest(ctx, cands[i].IP, useTLS, targetKB)
+
+			if !sr.Qualified {
+				setProgress(fmt.Sprintf("%s 未通过稳定测速（稳定均速 %d kB/s，峰值 %d kB/s），继续测试...", cands[i].IP, sr.VerifiedSpeed, sr.PeakSpeed))
 				continue
 			}
 
-			cands[i].MaxSpeed = kb
-			cands[i].RealBandwidth = kb / 128
-			cands[i].DataCenter = dc
+			qualifiedSeen[cands[i].IP] = true
+			cands[i].RealBandwidth = sr.VerifiedSpeed / 128
+			cands[i].MaxSpeed = sr.PeakSpeed
+			cands[i].DataCenter = sr.DataCenter
 			cands[i].Qualified = true
 			result.Candidates = append(result.Candidates, cands[i])
 
-			setProgress(fmt.Sprintf(
-				"找到达标 IP %d/%d：%s，%d kB/s，%dms",
-				len(result.Candidates), maxResults,
-				cands[i].IP, kb, cands[i].LatencyMs))
+			setProgress(fmt.Sprintf("找到达标 IP %d/%d：%s，稳定 %d kB/s，峰值 %d kB/s，RTT %dms",
+				len(result.Candidates), maxResults, cands[i].IP, sr.VerifiedSpeed, sr.PeakSpeed, cands[i].LatencyMs))
 
 			if len(result.Candidates) >= maxResults {
 				break
 			}
 		}
 
+		if result.Cancelled {
+			break
+		}
 		if len(result.Candidates) < maxResults {
-			setProgress(fmt.Sprintf(
-				"本轮结束，已找到 %d/%d 个达标 IP，继续新一轮测试...",
-				len(result.Candidates), maxResults))
+			setProgress(fmt.Sprintf("本轮结束，已找到 %d/%d 个达标 IP，继续新一轮测试...", len(result.Candidates), maxResults))
 		}
 	}
 
-	sort.Slice(result.Candidates, func(i,j int) bool {
-		if result.Candidates[i].MaxSpeed != result.Candidates[j].MaxSpeed {
-			return result.Candidates[i].MaxSpeed > result.Candidates[j].MaxSpeed
+	sort.Slice(result.Candidates, func(i, j int) bool {
+		if result.Candidates[i].RealBandwidth != result.Candidates[j].RealBandwidth {
+			return result.Candidates[i].RealBandwidth > result.Candidates[j].RealBandwidth
 		}
 		return result.Candidates[i].LatencyMs < result.Candidates[j].LatencyMs
 	})
 
-	result.Elapsed=int(time.Since(start).Seconds())
-	setProgress(fmt.Sprintf(
-		"扫描完成：已找到 %d/%d 个达到 %d Mbps 的 IP，用时 %d 秒",
-		len(result.Candidates), maxResults, bandwidth, result.Elapsed))
+	result.Elapsed = int(time.Since(start).Seconds())
+	if result.Cancelled {
+		setProgress("扫描已取消")
+	} else {
+		setProgress(fmt.Sprintf("扫描完成：找到 %d 个稳定达到 %d Mbps 的 IP，用时 %d 秒",
+			len(result.Candidates), bandwidth, result.Elapsed))
+	}
 
-	b,_:=json.Marshal(result)
+	b, _ := json.Marshal(result)
 	return string(b)
 }
 
@@ -400,5 +651,4 @@ func GetIPs(v4 bool, useTLS bool, bandwidth int) string {
 	b,_:=json.Marshal(out); return string(b)
 }
 
-func CancelScan() {}
 func init() { _ = strconv.IntSize }
