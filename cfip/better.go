@@ -270,48 +270,123 @@ func GetIPCandidates(v4 bool, useTLS bool, bandwidth int, maxResults int) string
 	if bandwidth <= 0 { bandwidth=1 }
 	if maxResults < 1 { maxResults=6 }
 	if maxResults > 10 { maxResults=10 }
+
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
+	ctx := context.Background()
 	result := CandidateListResult{Bandwidth:bandwidth}
+
 	if err := ensureData(ctx); err != nil {
-		result.Error = err.Error(); b,_:=json.Marshal(result); return string(b)
+		result.Error = err.Error()
+		b,_:=json.Marshal(result)
+		return string(b)
 	}
-	file := "ips-v4.txt"; if !v4 { file="ips-v6.txt" }
+
+	file := "ips-v4.txt"
+	if !v4 { file="ips-v6.txt" }
 	subnets, err := readLines(file)
-	if err != nil { result.Error=err.Error(); b,_:=json.Marshal(result); return string(b) }
+	if err != nil {
+		result.Error=err.Error()
+		b,_:=json.Marshal(result)
+		return string(b)
+	}
+	if len(subnets) == 0 {
+		result.Error="IP 列表为空"
+		b,_:=json.Marshal(result)
+		return string(b)
+	}
+
+	// Keep the original CFIP test semantics:
+	// the requested count means "qualified IP count", not "candidate count".
+	// Non-qualified IPs never enter the final result and never consume quota.
 	seen := map[string]bool{}
-	targetKB := bandwidth*128
-	for round:=1; round<=3 && len(result.Candidates)<maxResults; round++ {
-		setProgress(fmt.Sprintf("第 %d/3 轮：RTT 测试...", round))
+	targetKB := bandwidth * 128
+	round := 0
+
+	for len(result.Candidates) < maxResults {
+		round++
+		setProgress(fmt.Sprintf(
+			"第 %d 轮：已找到 %d/%d 个达标 IP，开始 RTT 测试...",
+			round, len(result.Candidates), maxResults))
+
 		var ips []string
-		for _, s := range sampleSubnets(subnets,100) {
-			if ip:=randomFromCIDR(s); ip!="" { ips=append(ips,ip) }
+		for _, s := range sampleSubnets(subnets, 100) {
+			if ip := randomFromCIDR(s); ip != "" && !seen[ip] {
+				seen[ip] = true
+				ips = append(ips, ip)
+			}
 		}
-		cands := rttCandidates(ctx,ips,useTLS)
+
+		// Extremely unlikely for normal CF CIDR lists, but do not spin on an
+		// empty generated batch. Clear the random-IP de-duplication set and
+		// start a fresh sampling cycle.
+		if len(ips) == 0 {
+			seen = map[string]bool{}
+			continue
+		}
+
+		cands := rttCandidates(ctx, ips, useTLS)
+		if len(cands) == 0 {
+			setProgress(fmt.Sprintf(
+				"第 %d 轮没有可用 RTT IP，继续下一轮（已达标 %d/%d）",
+				round, len(result.Candidates), maxResults))
+			continue
+		}
+
 		for i := range cands {
-			if seen[cands[i].IP] { continue }
-			seen[cands[i].IP]=true
-			setProgress(fmt.Sprintf("测速 %s (%dms)",cands[i].IP,cands[i].LatencyMs))
-			kb, dc := speedTest(ctx,cands[i].IP,useTLS)
-			if kb<=0 { continue }
-			cands[i].MaxSpeed=kb
-			cands[i].RealBandwidth=kb/128
-			cands[i].DataCenter=dc
-			cands[i].Qualified=kb>=targetKB
-			result.Candidates=append(result.Candidates,cands[i])
-			if len(result.Candidates)>=maxResults { break }
+			setProgress(fmt.Sprintf(
+				"测速 %s (%dms)，已达标 %d/%d",
+				cands[i].IP, cands[i].LatencyMs,
+				len(result.Candidates), maxResults))
+
+			kb, dc := speedTest(ctx, cands[i].IP, useTLS)
+			if kb <= 0 {
+				continue
+			}
+
+			// Same threshold semantics as the original test APK:
+			// bandwidth Mbps -> target kB/s, only accept maxSpeed >= target.
+			if kb < targetKB {
+				setProgress(fmt.Sprintf(
+					"%s 峰值 %d kB/s，未达到 %d Mbps，继续测试...",
+					cands[i].IP, kb, bandwidth))
+				continue
+			}
+
+			cands[i].MaxSpeed = kb
+			cands[i].RealBandwidth = kb / 128
+			cands[i].DataCenter = dc
+			cands[i].Qualified = true
+			result.Candidates = append(result.Candidates, cands[i])
+
+			setProgress(fmt.Sprintf(
+				"找到达标 IP %d/%d：%s，%d kB/s，%dms",
+				len(result.Candidates), maxResults,
+				cands[i].IP, kb, cands[i].LatencyMs))
+
+			if len(result.Candidates) >= maxResults {
+				break
+			}
+		}
+
+		if len(result.Candidates) < maxResults {
+			setProgress(fmt.Sprintf(
+				"本轮结束，已找到 %d/%d 个达标 IP，继续新一轮测试...",
+				len(result.Candidates), maxResults))
 		}
 	}
+
 	sort.Slice(result.Candidates, func(i,j int) bool {
-		if result.Candidates[i].Qualified != result.Candidates[j].Qualified { return result.Candidates[i].Qualified }
-		if result.Candidates[i].MaxSpeed != result.Candidates[j].MaxSpeed { return result.Candidates[i].MaxSpeed > result.Candidates[j].MaxSpeed }
+		if result.Candidates[i].MaxSpeed != result.Candidates[j].MaxSpeed {
+			return result.Candidates[i].MaxSpeed > result.Candidates[j].MaxSpeed
+		}
 		return result.Candidates[i].LatencyMs < result.Candidates[j].LatencyMs
 	})
-	if len(result.Candidates)>maxResults { result.Candidates=result.Candidates[:maxResults] }
+
 	result.Elapsed=int(time.Since(start).Seconds())
-	if len(result.Candidates)==0 { result.Error="未找到可用 IP" }
-	setProgress(fmt.Sprintf("扫描完成：%d 个候选，用时 %d 秒",len(result.Candidates),result.Elapsed))
+	setProgress(fmt.Sprintf(
+		"扫描完成：已找到 %d/%d 个达到 %d Mbps 的 IP，用时 %d 秒",
+		len(result.Candidates), maxResults, bandwidth, result.Elapsed))
+
 	b,_:=json.Marshal(result)
 	return string(b)
 }
