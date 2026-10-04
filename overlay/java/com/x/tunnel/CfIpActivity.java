@@ -78,6 +78,7 @@ public class CfIpActivity extends Activity {
     private static final class Row {
         String ip;
         boolean qualified;
+        boolean latestBatch;
         CheckBox box;
     }
 
@@ -214,14 +215,14 @@ public class CfIpActivity extends Activity {
         selectQualified.setOnClickListener(x -> {
             int selectedCount = 0;
             for (Row row : rows) {
-                boolean choose = row.qualified;
+                boolean choose = row.latestBatch && row.qualified;
                 row.box.setChecked(choose);
                 if (choose) selectedCount++;
             }
             updateControls();
             progress.setText(selectedCount > 0
-                    ? "已选择 " + selectedCount + " 个达标 IP"
-                    : "当前记录中没有达到目标带宽的 IP");
+                    ? "已选择最近一次测速的 " + selectedCount + " 个达标 IP"
+                    : "最近一次测速中没有达到目标带宽的 IP");
         });
         clearSelection.setOnClickListener(x -> {
             for (Row row : rows) row.box.setChecked(false);
@@ -492,7 +493,10 @@ public class CfIpActivity extends Activity {
                 box.setOnCheckedChangeListener((b, checked) -> updateControls());
                 results.addView(box, full());
                 Row row = new Row();
-                row.ip = ip; row.qualified = qualified; row.box = box;
+                row.ip = ip;
+                row.qualified = qualified;
+                row.latestBatch = (batchIndex == 0);
+                row.box = box;
                 rows.add(row);
             }
         }
