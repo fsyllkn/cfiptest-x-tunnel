@@ -389,6 +389,115 @@ replace_once(
 ''',
 )
 
+app_list = app / 'java/com/x/tunnel/AppListActivity.java'
+replace_once(
+    app_list,
+    '''import android.widget.EditText;
+''',
+    '''import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.Button;
+''',
+)
+
+replace_once(
+    app_list,
+    '''		EditText searchBox = new EditText(this);
+		searchBox.setHint("搜索应用");
+		int pad = (int) (8 * getResources().getDisplayMetrics().density);
+		searchBox.setPadding(pad, pad, pad, pad);
+		getListView().addHeaderView(searchBox, null, false);
+''',
+    '''		LinearLayout tools = new LinearLayout(this);
+		tools.setOrientation(LinearLayout.VERTICAL);
+		int pad = (int) (8 * getResources().getDisplayMetrics().density);
+		tools.setPadding(pad, pad, pad, pad);
+
+		EditText searchBox = new EditText(this);
+		searchBox.setHint("搜索应用");
+		searchBox.setPadding(pad, pad, pad, pad);
+		tools.addView(searchBox, new LinearLayout.LayoutParams(
+				LinearLayout.LayoutParams.MATCH_PARENT,
+				LinearLayout.LayoutParams.WRAP_CONTENT));
+
+		LinearLayout buttons = new LinearLayout(this);
+		buttons.setOrientation(LinearLayout.HORIZONTAL);
+		Button selectAll = new Button(this);
+		selectAll.setText("全选");
+		Button clearAll = new Button(this);
+		clearAll.setText("清空");
+		Button aiFilter = new Button(this);
+		aiFilter.setText("AI筛选");
+		buttons.addView(selectAll, new LinearLayout.LayoutParams(0,
+				LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+		buttons.addView(clearAll, new LinearLayout.LayoutParams(0,
+				LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+		buttons.addView(aiFilter, new LinearLayout.LayoutParams(0,
+				LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+		tools.addView(buttons, new LinearLayout.LayoutParams(
+				LinearLayout.LayoutParams.MATCH_PARENT,
+				LinearLayout.LayoutParams.WRAP_CONTENT));
+
+		getListView().addHeaderView(tools, null, false);
+''',
+)
+
+replace_once(
+    app_list,
+    '''		searchBox.addTextChangedListener(new TextWatcher() {
+''',
+    '''		selectAll.setOnClickListener(v -> {
+			for (Package pkg : adapter.getAllPackages()) {
+				pkg.selected = true;
+			}
+			isChanged = true;
+			adapter.applyFilter(searchBox.getText().toString());
+		});
+
+		clearAll.setOnClickListener(v -> {
+			for (Package pkg : adapter.getAllPackages()) {
+				pkg.selected = false;
+			}
+			isChanged = true;
+			adapter.applyFilter(searchBox.getText().toString());
+		});
+
+		aiFilter.setOnClickListener(v -> searchBox.setText("ai"));
+
+		searchBox.addTextChangedListener(new TextWatcher() {
+''',
+)
+
+replace_once(
+    app_list,
+    '''		private boolean matchesFilter(Package pkg, String filter) {
+			if (filter == null || filter.length() == 0)
+				return true;
+			return pkg.label.toLowerCase().contains(filter.toLowerCase());
+		}
+''',
+    '''		private boolean matchesFilter(Package pkg, String filter) {
+			if (filter == null || filter.length() == 0)
+				return true;
+			String f = filter.toLowerCase();
+			String label = pkg.label == null ? "" : pkg.label.toLowerCase();
+			String name = pkg.info.packageName == null ? "" : pkg.info.packageName.toLowerCase();
+			if ("ai".equals(f)) {
+				String[] keys = {
+					"chatgpt", "openai", "claude", "anthropic", "gemini", "bard",
+					"grok", "perplexity", "copilot", "microsoft365", "poe",
+					"deepseek", "qwen", "tongyi", "doubao", "kimi", "moonshot"
+				};
+				for (String k : keys) {
+					if (label.contains(k) || name.contains(k)) return true;
+				}
+				return false;
+			}
+			return label.contains(f) || name.contains(f);
+		}
+''',
+)
+
 layout = app / 'res/layout/main.xml'
 replace_once(
     layout,
