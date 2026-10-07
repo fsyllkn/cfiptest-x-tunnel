@@ -32,6 +32,7 @@ replace_once(
     '''		<activity android:name=".AppListActivity" android:label="@string/app_name"/>
 		<activity android:name=".CfIpActivity" android:label="CF 优选 IP" android:exported="false"/>
 		<activity android:name=".ConfigTransferActivity" android:label="配置导入 / 导出" android:exported="false"/>
+		<activity android:name=".NetworkPolicyActivity" android:label="网络策略" android:exported="false"/>
 ''',
 )
 
@@ -107,6 +108,88 @@ replace_once(
 ''',
 )
 
+replace_once(
+    prefs,
+    '''        public static final String PROFILE_NAME_PREFIX = "ProfileName_";
+''',
+    '''        public static final String PROFILE_NAME_PREFIX = "ProfileName_";
+
+        public static final String NETWORK_MODE = "NetworkMode";
+        public static final String WEBRTC_MODE = "WebRtcMode";
+        public static final int NETWORK_STANDARD = 0;
+        public static final int NETWORK_AI_STABLE = 1;
+        public static final int WEBRTC_COMPAT = 0;
+        public static final int WEBRTC_STRICT = 1;
+''',
+)
+
+replace_once(
+    prefs,
+    '''	public void setEnable(boolean enable) {
+		SharedPreferences.Editor editor = prefs.edit();
+		editor.putBoolean(ENABLE, enable);
+		editor.commit();
+	}
+
+	public int getTunnelMtu() {
+''',
+    '''	public void setEnable(boolean enable) {
+		SharedPreferences.Editor editor = prefs.edit();
+		editor.putBoolean(ENABLE, enable);
+		editor.commit();
+	}
+
+        public int getNetworkMode() {
+                return prefs.getInt(NETWORK_MODE, NETWORK_STANDARD);
+        }
+
+        public void setNetworkMode(int mode) {
+                prefs.edit().putInt(NETWORK_MODE, mode).commit();
+        }
+
+        public int getWebRtcMode() {
+                return prefs.getInt(WEBRTC_MODE, WEBRTC_COMPAT);
+        }
+
+        public void setWebRtcMode(int mode) {
+                prefs.edit().putInt(WEBRTC_MODE, mode).commit();
+        }
+
+        private String mergeUdpPorts(String base, String extra) {
+                java.util.LinkedHashSet<String> ports = new java.util.LinkedHashSet<String>();
+                if (base != null) {
+                        for (String p : base.split(",")) {
+                                p = p.trim();
+                                if (!p.isEmpty()) ports.add(p);
+                        }
+                }
+                if (extra != null) {
+                        for (String p : extra.split(",")) {
+                                p = p.trim();
+                                if (!p.isEmpty()) ports.add(p);
+                        }
+                }
+                return android.text.TextUtils.join(",", ports);
+        }
+
+        public String getRuntimeIpsPref() {
+                if (getNetworkMode() == NETWORK_AI_STABLE) return "4";
+                return getIpsPref();
+        }
+
+        public String getRuntimeUdpBlockPorts() {
+                if (getNetworkMode() != NETWORK_AI_STABLE) return getUdpBlockPorts();
+                if (getWebRtcMode() == WEBRTC_STRICT) {
+                        return mergeUdpPorts(getUdpBlockPorts(),
+                                "443,3478,5349,19302,19305,19306,19307,19308,19309");
+                }
+                return mergeUdpPorts(getUdpBlockPorts(), "443");
+        }
+
+	public int getTunnelMtu() {
+''',
+)
+
 main = app / 'java/com/x/tunnel/MainActivity.java'
 replace_once(
     main,
@@ -129,6 +212,7 @@ replace_once(
     private Button button_control;
     private Button button_cf_optimize;
     private Button button_config_transfer;
+    private Button button_network_policy;
 ''',
 )
 replace_once(
@@ -152,6 +236,7 @@ replace_once(
         button_control = (Button) findViewById(R.id.control);
         button_cf_optimize = (Button) findViewById(R.id.cf_optimize);
         button_config_transfer = (Button) findViewById(R.id.config_transfer);
+        button_network_policy = (Button) findViewById(R.id.network_policy);
 ''',
 )
 replace_once(
@@ -175,6 +260,7 @@ replace_once(
         button_control.setOnClickListener(this);
         button_cf_optimize.setOnClickListener(this);
         button_config_transfer.setOnClickListener(this);
+        button_network_policy.setOnClickListener(this);
 ''',
 )
 replace_once(
@@ -256,6 +342,8 @@ replace_once(
             startActivity(new Intent(this, CfIpActivity.class));
         } else if (view == button_config_transfer) {
             startActivity(new Intent(this, ConfigTransferActivity.class));
+        } else if (view == button_network_policy) {
+            startActivity(new Intent(this, NetworkPolicyActivity.class));
         } else if (view == button_apps) {
             startActivity(new Intent(this, AppListActivity.class));
 ''',
@@ -360,7 +448,16 @@ replace_once(
                 android:layout_weight="1"
                 android:text="@string/config_transfer"
                 android:textColor="#FFFFFF"
-                android:backgroundTint="#546E7A" />
+                android:backgroundTint="#546E7A"
+                android:layout_marginEnd="4dp" />
+            <Button
+                android:id="@+id/network_policy"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/network_policy"
+                android:textColor="#FFFFFF"
+                android:backgroundTint="#455A64" />
         </LinearLayout>
         
         <LinearLayout
@@ -383,6 +480,7 @@ replace_once(
     '''        <string name="control_disable">停止</string>
         <string name="cf_optimize">CF 优选 IP</string>
         <string name="config_transfer">配置导入/导出</string>
+        <string name="network_policy">网络策略</string>
 ''',
 )
 
