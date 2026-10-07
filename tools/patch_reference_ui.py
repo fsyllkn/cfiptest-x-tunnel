@@ -470,6 +470,35 @@ replace_once(
 
 replace_once(
     app_list,
+    '''		public void applyFilter(String filter) {
+			lastFilter = filter != null ? filter : "";
+			filteredPackages.clear();
+			if (lastFilter.length() == 0) {
+				filteredPackages.addAll(allPackages);
+			} else {
+				String f = lastFilter.toLowerCase();
+				for (Package p : allPackages) {
+					if (p.label != null && p.label.toLowerCase().contains(f))
+						filteredPackages.add(p);
+				}
+			}
+			notifyDataSetChanged();
+		}
+''',
+    '''		public void applyFilter(String filter) {
+			lastFilter = filter != null ? filter : "";
+			filteredPackages.clear();
+			for (Package p : allPackages) {
+				if (matchesFilter(p, lastFilter))
+					filteredPackages.add(p);
+			}
+			notifyDataSetChanged();
+		}
+''',
+)
+
+replace_once(
+    app_list,
     '''		private boolean matchesFilter(Package pkg, String filter) {
 			if (filter == null || filter.length() == 0)
 				return true;
