@@ -1,0 +1,31 @@
+name: Fetch X-Tunnel v13 Android arm64
+
+on:
+  push:
+    branches:
+      - build/ztunnel-core-v13
+
+jobs:
+  fetch:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Download official v.13 Android arm64 CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L --fail --retry 3 --retry-delay 2             -o x-tunnel-android-arm64             https://github.com/hhsw2015/x-tunnel/releases/download/v.13/x-tunnel-android-arm64
+          curl -L --fail --retry 3 --retry-delay 2             -o SHA256SUMS.txt             https://github.com/hhsw2015/x-tunnel/releases/download/v.13/SHA256SUMS.txt
+          grep ' x-tunnel-android-arm64$' SHA256SUMS.txt > x-tunnel-android-arm64.sha256
+          sha256sum -c x-tunnel-android-arm64.sha256
+          chmod 0755 x-tunnel-android-arm64
+          file x-tunnel-android-arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-tunnel-v13-android-arm64-cli
+          path: |
+            x-tunnel-android-arm64
+            x-tunnel-android-arm64.sha256
+          if-no-files-found: error
+          retention-days: 1
