@@ -178,12 +178,15 @@ replace_once(
         }
 
         public String getRuntimeUdpBlockPorts() {
-                if (getNetworkMode() != NETWORK_AI_STABLE) return getUdpBlockPorts();
+                String ports = getUdpBlockPorts();
+                if (getNetworkMode() == NETWORK_AI_STABLE) {
+                        ports = mergeUdpPorts(ports, "443");
+                }
                 if (getWebRtcMode() == WEBRTC_STRICT) {
-                        return mergeUdpPorts(getUdpBlockPorts(),
+                        ports = mergeUdpPorts(ports,
                                 "443,3478,5349,19302,19305,19306,19307,19308,19309");
                 }
-                return mergeUdpPorts(getUdpBlockPorts(), "443");
+                return ports;
         }
 
 	public int getTunnelMtu() {
