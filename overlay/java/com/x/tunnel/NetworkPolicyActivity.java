@@ -15,6 +15,7 @@ public class NetworkPolicyActivity extends Activity {
     private RadioButton webrtcCompat;
     private RadioButton webrtcStrict;
     private TextView status;
+    private boolean loading = false;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -97,6 +98,7 @@ public class NetworkPolicyActivity extends Activity {
     }
 
     private void load() {
+        loading = true;
         if (prefs.getNetworkMode() == Preferences.NETWORK_AI_STABLE) {
             aiStable.setChecked(true);
         } else {
@@ -108,10 +110,12 @@ public class NetworkPolicyActivity extends Activity {
         } else {
             webrtcCompat.setChecked(true);
         }
+        loading = false;
         updateStatus();
     }
 
     private void save() {
+        if (loading) return;
         if (standard == null || aiStable == null || webrtcCompat == null || webrtcStrict == null) return;
         prefs.setNetworkMode(aiStable.isChecked()
                 ? Preferences.NETWORK_AI_STABLE
@@ -137,7 +141,8 @@ public class NetworkPolicyActivity extends Activity {
                 + prefs.getRuntimeIpsPref()
                 + "\n运行时 UDP 屏蔽端口："
                 + prefs.getRuntimeUdpBlockPorts()
-                + "\n远程 DNS：启用");
+                + "\n远程 DNS：启用"
+                + (prefs.getEnable() ? "\n注意：VPN 正在运行，策略将在重新连接后生效" : ""));
     }
 
     private LinearLayout.LayoutParams full() {
